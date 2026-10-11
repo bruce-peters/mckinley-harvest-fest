@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Play Button Player</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+  }
+
+  video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2rem;
+    padding: 2rem;
+    background: #000;
+    color: #fff;
+    font: 600 clamp(1.5rem, 4vw, 3rem) / 1.3 system-ui, sans-serif;
+    text-align: center;
+  }
+
+  #overlay[hidden], #choose[hidden], #steps[hidden] {
+    display: none;
+  }
+
+  #steps {
+    max-width: 34em;
+    margin: 0;
+    padding-left: 1.4em;
+    font: 400 clamp(1rem, 2vw, 1.4rem) / 1.5 system-ui, sans-serif;
+    text-align: left;
+  }
+
+  #steps li + li {
+    margin-top: 0.6em;
+  }
+
+  /* Once a video is chosen, hide the mouse pointer so it isn't projected */
+  body.ready {
+    cursor: none;
+  }
+
+  #choose {
+    padding: 0.6em 1.4em;
+    border: 0;
+    border-radius: 0.4em;
+    background: #fff;
+    color: #000;
+    font: inherit;
+    cursor: pointer;
+  }
+
+</style>
+</head>
+<body>
+<video id="video" preload="auto" playsinline></video>
+
+<div id="overlay">
+  <div id="message"></div>
+  <ol id="steps" hidden>
+    <li>Power on the button box, then open this device's Bluetooth settings and connect to "Play Button".</li>
+    <li>Choose the video file with the button below.</li>
+    <li>On a computer, press F11 to fill the whole screen.</li>
+    <li>The screen then stays black until the button is pressed. Press C on a keyboard to pick a different video.</li>
+  </ol>
+  <button id="choose" type="button" hidden>Choose video</button>
+</div>
+<input id="picker" type="file" accept="video/*" hidden>
+
+<script>
+  // Keys that start the video. The ESP32 sends Space, which phones, tablets
+  // and computers all understand. Enter works too, for a regular keyboard.
+  const TRIGGER_KEYS = [" ", "Enter"];
+  // true: a press during playback restarts the video. false: it is ignored.
+  const RESTART_WHILE_PLAYING = true;
+
+  // Opens the file chooser again, to swap the video after setup
+  const CHANGE_VIDEO_KEY = "c";
+
+  const CHOOSE_TEXT = "Play Button setup";
+
+  const video = document.getElementById("video");
+  const overlay = document.getElementById("overlay");
+  const message = document.getElementById("message");
+  const chooseButton = document.getElementById("choose");
+  const steps = document.getElementById("steps");
+  const picker = document.getElementById("picker");
+
+  let hasVideo = false;
+
+  // Waiting for a press: a plain black screen, since the page is projected
+  function showIdle() {
+    message.textContent = "";
+    chooseButton.hidden = true;
+    steps.hidden = true;
+    overlay.hidden = false;
+    document.body.classList.add("ready");
+  }
+
+  function showChooser(text) {
+    message.textContent = text;
+    chooseButton.hidden = false;
+    steps.hidden = false;
+    overlay.hidden = false;
+    document.body.classList.remove("ready");
+  }
+
+  // The chosen file is kept in the browser's own storage on this device, so the
+  // page still has it after a reload. Nothing is uploaded anywhere.
+  function openStore() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open("play-button-player", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function saveVideo(file) {
+    const db = await openStore();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(file, "video");
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  async function loadSavedVideo() {
+    const db = await openStore();
+    return new Promise((resolve, reject) => {
+      const request = db.transaction("files").objectStore("files").get("video");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function useVideo(file) {
+    if (video.src) URL.revokeObjectURL(video.src);
+    video.src = URL.createObjectURL(file);
+    hasVideo = true;
+    showIdle();
+  }
+
+  async function chooseVideo(file) {
+    useVideo(file);
+    try {
+      await saveVideo(file);
+    } catch (err) {
+      // Storage is full or blocked. The video still plays, but it will have
+      // to be chosen again if the page is reloaded.
+    }
+  }
+
+  async function trigger() {
+    if (!hasVideo) return;
+    const playing = !video.paused && !video.ended;
+    if (playing && !RESTART_WHILE_PLAYING) return;
+
+    video.currentTime = 0;
+    try {
+      await video.play();
+      overlay.hidden = true;
+    } catch (err) {
+      // The browser blocks sound until the page has had one real key press or tap
+      if (err.name === "NotAllowedError") {
+        message.textContent = "Tap the screen once to allow sound, then press the button";
+      }
+    }
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key.toLowerCase() === CHANGE_VIDEO_KEY && !event.repeat) {
+      video.pause();
+      picker.click();
+      return;
+    }
+    if (!TRIGGER_KEYS.includes(event.key) || event.repeat) return;
+    event.preventDefault();
+    trigger();
+  });
+
+  // A tap or click on the screen does the same thing as the button
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("button, input")) return;
+    trigger();
+  });
+
+  chooseButton.addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => {
+    if (picker.files[0]) chooseVideo(picker.files[0]);
+    picker.value = "";
+  });
+
+  video.addEventListener("ended", () => {
+    video.currentTime = 0;
+    showIdle();
+  });
+
+  video.addEventListener("error", () => {
+    hasVideo = false;
+    showChooser("That file could not be played. Choose a different video.");
+  });
+
+  // Keep a phone or tablet screen from dimming and locking while the page is open.
+  // The lock is dropped whenever the page is hidden, so ask again when it returns.
+  async function keepScreenOn() {
+    if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+    try {
+      await navigator.wakeLock.request("screen");
+    } catch (err) {
+      // Not allowed right now (low battery, for example). The page still works.
+    }
+  }
+  keepScreenOn();
+  document.addEventListener("visibilitychange", keepScreenOn);
+
+  loadSavedVideo()
+    .then((file) => (file ? useVideo(file) : showChooser(CHOOSE_TEXT)))
+    .catch(() => showChooser(CHOOSE_TEXT));
+</script>
+</body>
+</html>
